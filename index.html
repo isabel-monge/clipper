@@ -79,7 +79,8 @@
 </div>
 
 <script>
-  const WEBHOOK_URL = "https://learnwiseai.app.n8n.cloud/webhook/shotstack-upload";
+  const N8N_UPLOAD = "https://learnwiseai.app.n8n.cloud/webhook/shotstack-upload";
+  const N8N_STATUS = "https://learnwiseai.app.n8n.cloud/webhook/shotstack-status";
   const ENV = "v1";
   let videoSrc = null;
   let clipData = [];
@@ -91,6 +92,7 @@
   }
   function clearError() { document.getElementById("error").style.display = "none"; }
   function setProgress(pct) { document.getElementById("progressFill").style.width = pct + "%"; }
+  function setStep(msg) { document.getElementById("stepMsg").textContent = msg; }
 
   function handleFileSelect(e) {
     const file = e.target.files[0];
@@ -98,28 +100,63 @@
     const area = document.getElementById("uploadArea");
     area.innerHTML = `<p>📹 <strong>${file.name}</strong></p><p style="margin-top:0.25rem;font-size:0.75rem">Click to change</p>`;
     area.classList.add("has-file");
-    uploadViaWebhook(file);
+    uploadFile(file);
   }
 
-  async function uploadViaWebhook(file) {
+  async function uploadFile(file) {
     clearError();
     document.getElementById("uploadProgress").style.display = "block";
     document.getElementById("uploadSuccess").style.display = "none";
     document.getElementById("runBtn").disabled = true;
     setProgress(10);
+    setStep("Getting upload URL…");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const res = await fetch(WEBHOOK_URL, { method: "POST", body: formData });
-      setProgress(80);
-
-      if (!res.ok) throw new Error("Upload failed with status " + res.status);
+      // Step 1: Ask n8n to get a signed upload URL from Shotstack
+      const res = await fetch(N8N_UPLOAD, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to get upload URL, status: " + res.status);
       const data = await res.json();
-      if (!data.sourceUrl) throw new Error("No source URL returned: " + JSON.stringify(data));
+      if (!data.uploadUrl || !data.sourceId) throw new Error("Bad response from server: " + JSON.stringify(data));
 
-      videoSrc = data.sourceUrl;
+      setProgress(20);
+      setStep("Uploading video to Shotstack… this may take a few minutes");
+
+      // Step 2: Upload the file directly to S3 using the signed URL (no Content-Type header)
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", data.uploadUrl);
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) setProgress(20 + Math.round((e.loaded / e.total) * 60));
+      };
+      await new Promise((resolve, reject) => {
+        xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error("S3 upload failed: " + xhr.status));
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.send(file);
+      });
+
+      setProgress(85);
+      setStep("Processing video… almost there");
+
+      // Step 3: Poll n8n until Shotstack says the video is ready
+      const sourceId = data.sourceId;
+      let sourceUrl = null;
+      for (let i = 0; i < 24; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        const pollRes = await fetch(N8N_STATUS, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sourceId })
+        });
+        const pollData = await pollRes.json();
+        if (pollData.status === "ready" && pollData.sourceUrl) {
+          sourceUrl = pollData.sourceUrl;
+          break;
+        }
+        if (pollData.status === "failed") throw new Error("Shotstack failed to process the video");
+      }
+
+      if (!sourceUrl) throw new Error("Timed out waiting for video to process");
+
+      videoSrc = sourceUrl;
       setProgress(100);
       document.getElementById("uploadProgress").style.display = "none";
       const s = document.getElementById("uploadSuccess");
@@ -189,7 +226,7 @@
       });
       const data = await res.json();
       const status = data.response.status;
-      if (status === "done")   return { status: "done",   url: data.response.url };
+      if (status === "done") return { status: "done", url: data.response.url };
       if (status === "failed") return { status: "failed", url: null, errorMsg: data.response.error || "Render failed" };
     }
     return { status: "failed", url: null, errorMsg: "Timed out" };
