@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Shotstack Video Clipper</title>
+  <style>
+    body { font-family: sans-serif; background: #f9fafb; padding: 2rem; color: #1f2937; }
+    h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.25rem; }
+    p.sub { color: #6b7280; font-size: 0.875rem; margin-bottom: 1.5rem; }
+    .card { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 1.5rem; max-width: 680px; margin-bottom: 1.5rem; }
+    label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.25rem; }
+    input, textarea { width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 8px; padding: 0.5rem 0.75rem; font-size: 0.875rem; margin-bottom: 1rem; }
+    textarea { font-family: monospace; resize: vertical; }
+    .hint { font-size: 0.75rem; color: #9ca3af; margin-top: -0.75rem; margin-bottom: 1rem; }
+    button { width: 100%; background: #2563eb; color: white; border: none; border-radius: 8px; padding: 0.65rem; font-size: 0.875rem; font-weight: 600; cursor: pointer; }
+    button:disabled { background: #93c5fd; cursor: not-allowed; }
+    button.secondary { background: white; color: #374151; border: 1px solid #d1d5db; margin-top: 0.75rem; }
+    .error { background: #fef2f2; border: 1px solid #fca5a5; color: #b91c1c; border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.875rem; margin-bottom: 1rem; }
+    .success { background: #f0fdf4; border: 1px solid #86efac; color: #166534; border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.875rem; margin-bottom: 1rem; }
+    .clip { display: flex; justify-content: space-between; align-items: flex-start; background: #f9fafb; border: 1px solid #f3f4f6; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
+    .clip-info p { margin: 0; }
+    .clip-title { font-size: 0.875rem; font-weight: 500; }
+    .clip-time { font-size: 0.75rem; color: #9ca3af; }
+    .clip-url a { font-size: 0.75rem; color: #2563eb; word-break: break-all; }
+    .clip-error { font-size: 0.75rem; color: #ef4444; }
+    .badge { font-size: 0.7rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 9999px; white-space: nowrap; }
+    .badge-queued { background: #fef9c3; color: #92400e; }
+    .badge-rendering { background: #dbeafe; color: #1e40af; }
+    .badge-done { background: #dcfce7; color: #166534; }
+    .badge-failed { background: #fee2e2; color: #991b1b; }
+    h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; }
+    .upload-area { border: 2px dashed #d1d5db; border-radius: 8px; padding: 1.5rem; text-align: center; cursor: pointer; margin-bottom: 1rem; transition: border-color 0.2s; }
+    .upload-area:hover { border-color: #2563eb; }
+    .upload-area.has-file { border-color: #86efac; background: #f0fdf4; }
+    .upload-area p { margin: 0; font-size: 0.875rem; color: #6b7280; }
+    .progress-bar { width: 100%; background: #e5e7eb; border-radius: 999px; height: 6px; margin-bottom: 0.5rem; overflow: hidden; }
+    .progress-fill { height: 100%; background: #2563eb; border-radius: 999px; transition: width 0.3s; }
+    .step { font-size: 0.75rem; color: #6b7280; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+
+<h1>🎬 Shotstack Video Clipper</h1>
+<p class="sub">Upload your meeting video and paste your clip timestamps to get back a list of URLs.</p>
+
+<div class="card">
+  <label>Shotstack API Key</label>
+  <input type="password" id="apiKey" value="43ozwA5mE1iKfvM2mGbW4TGnaVrCGCxWpo06DlWg" />
+
+  <label>Video File</label>
+  <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+    <p>📁 <strong>Click to choose your MP4</strong></p>
+    <p style="margin-top:0.25rem;font-size:0.75rem">Downloaded from Read.ai</p>
+  </div>
+  <input type="file" id="fileInput" accept="video/*" style="display:none" onchange="handleFileSelect(event)" />
+
+  <div id="uploadProgress" style="display:none">
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+    <p class="step" id="stepMsg">Uploading… this may take a minute for large files</p>
+  </div>
+
+  <div id="uploadSuccess" style="display:none" class="success"></div>
+
+  <label>Clips JSON</label>
+  <textarea id="jsonInput" rows="8">[
+  { "title": "Example clip", "start": 0, "end": 30 }
+]</textarea>
+  <p class="hint">Each clip needs a "title", "start", and "end" in seconds.</p>
+
+  <div id="error" class="error" style="display:none"></div>
+  <button id="runBtn" onclick="handleRun()" disabled>▶ Run</button>
+</div>
+
+<div class="card" id="results" style="display:none">
+  <h2 id="resultsTitle">⏳ Rendering in progress…</h2>
+  <div id="clipList"></div>
+  <button class="secondary" id="copyBtn" style="display:none" onclick="copyAll()">📋 Copy all URLs to clipboard</button>
+</div>
+
+<script>
+  const WEBHOOK_URL = "https://learnwiseai.app.n8n.cloud/webhook/shotstack-upload";
+  const ENV = "v1";
+  let videoSrc = null;
+  let clipData = [];
+
+  function showError(msg) {
+    const el = document.getElementById("error");
+    el.textContent = "⚠️ " + msg;
+    el.style.display = "block";
+  }
+  function clearError() { document.getElementById("error").style.display = "none"; }
+  function setProgress(pct) { document.getElementById("progressFill").style.width = pct + "%"; }
+
+  function handleFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const area = document.getElementById("uploadArea");
+    area.innerHTML = `<p>📹 <strong>${file.name}</strong></p><p style="margin-top:0.25rem;font-size:0.75rem">Click to change</p>`;
+    area.classList.add("has-file");
+    uploadViaWebhook(file);
+  }
+
+  async function uploadViaWebhook(file) {
+    clearError();
+    document.getElementById("uploadProgress").style.display = "block";
+    document.getElementById("uploadSuccess").style.display = "none";
+    document.getElementById("runBtn").disabled = true;
+    setProgress(10);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch(WEBHOOK_URL, { method: "POST", body: formData });
+      setProgress(80);
+
+      if (!res.ok) throw new Error("Upload failed with status " + res.status);
+      const data = await res.json();
+      if (!data.sourceUrl) throw new Error("No source URL returned: " + JSON.stringify(data));
+
+      videoSrc = data.sourceUrl;
+      setProgress(100);
+      document.getElementById("uploadProgress").style.display = "none";
+      const s = document.getElementById("uploadSuccess");
+      s.textContent = "✅ Video ready — now hit Run!";
+      s.style.display = "block";
+      document.getElementById("runBtn").disabled = false;
+
+    } catch (e) {
+      document.getElementById("uploadProgress").style.display = "none";
+      showError("Upload failed: " + e.message);
+    }
+  }
+
+  function renderClips() {
+    const list = document.getElementById("clipList");
+    list.innerHTML = clipData.map(c => `
+      <div class="clip">
+        <div class="clip-info">
+          <p class="clip-title">${c.title}</p>
+          <p class="clip-time">${c.start}s → ${c.end}s (${c.end - c.start}s)</p>
+          ${c.url ? `<p class="clip-url"><a href="${c.url}" target="_blank">${c.url}</a></p>` : ""}
+          ${c.errorMsg ? `<p class="clip-error">${c.errorMsg}</p>` : ""}
+        </div>
+        <span class="badge badge-${c.status}">${c.status}</span>
+      </div>
+    `).join("");
+
+    const allDone = clipData.every(c => c.status === "done" || c.status === "failed");
+    if (allDone) {
+      document.getElementById("resultsTitle").textContent = "✅ Results";
+      if (clipData.some(c => c.status === "done")) {
+        document.getElementById("copyBtn").style.display = "block";
+      }
+    }
+  }
+
+  function copyAll() {
+    const text = clipData.filter(c => c.url).map(c => `${c.title}: ${c.url}`).join("\n");
+    navigator.clipboard.writeText(text).then(() => alert("Copied to clipboard!"));
+  }
+
+  async function submitRender(clip) {
+    const API_KEY = document.getElementById("apiKey").value.trim();
+    const duration = clip.end - clip.start;
+    const body = {
+      timeline: {
+        tracks: [{ clips: [{ asset: { type: "video", src: videoSrc, trim: clip.start }, start: 0, length: duration }] }]
+      },
+      output: { format: "mp4", resolution: "hd" }
+    };
+    const res = await fetch(`https://api.shotstack.io/${ENV}/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || JSON.stringify(data));
+    return data.response.id;
+  }
+
+  async function pollRender(renderId) {
+    const API_KEY = document.getElementById("apiKey").value.trim();
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+      const res = await fetch(`https://api.shotstack.io/${ENV}/render/${renderId}`, {
+        headers: { "x-api-key": API_KEY }
+      });
+      const data = await res.json();
+      const status = data.response.status;
+      if (status === "done")   return { status: "done",   url: data.response.url };
+      if (status === "failed") return { status: "failed", url: null, errorMsg: data.response.error || "Render failed" };
+    }
+    return { status: "failed", url: null, errorMsg: "Timed out" };
+  }
+
+  async function handleRun() {
+    clearError();
+    if (!videoSrc) return showError("Please upload a video first.");
+
+    let parsed;
+    try {
+      parsed = JSON.parse(document.getElementById("jsonInput").value.trim());
+      if (!Array.isArray(parsed)) throw new Error();
+    } catch {
+      return showError("Invalid JSON. Make sure it's a list [ ] of clips with title, start, and end.");
+    }
+
+    document.getElementById("runBtn").disabled = true;
+    document.getElementById("runBtn").textContent = "⏳ Processing clips…";
+    document.getElementById("results").style.display = "block";
+    document.getElementById("copyBtn").style.display = "none";
+    document.getElementById("resultsTitle").textContent = "⏳ Rendering in progress…";
+
+    clipData = parsed.map(c => ({ ...c, status: "queued", url: null, errorMsg: null }));
+    renderClips();
+
+    const BATCH_SIZE = 5;
+    for (let b = 0; b < parsed.length; b += BATCH_SIZE) {
+      const batch = parsed.slice(b, b + BATCH_SIZE);
+      await Promise.all(batch.map(async (clip, j) => {
+        const i = b + j;
+        try {
+          const renderId = await submitRender(clip);
+          clipData[i] = { ...clipData[i], status: "rendering" };
+          renderClips();
+          const result = await pollRender(renderId);
+          clipData[i] = { ...clipData[i], ...result };
+          renderClips();
+        } catch (e) {
+          clipData[i] = { ...clipData[i], status: "failed", errorMsg: e.message };
+          renderClips();
+        }
+      }));
+    }
+
+    document.getElementById("runBtn").disabled = false;
+    document.getElementById("runBtn").textContent = "▶ Run";
+  }
+</script>
+</body>
+</html>
