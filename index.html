@@ -33,7 +33,7 @@
   .clip-name { font-size: 14px; font-weight: 500; }
   .clip-status { font-size: 12px; color: #666; margin-top: 2px; }
   .dl { background: #0071e3; color: white; border: none; border-radius: 7px; padding: 8px 14px; font-size: 13px; cursor: pointer; text-decoration: none; white-space: nowrap; }
-  .error { background: #fff0f0; color: #c0392b; border-radius: 8px; padding: 12px 14px; font-size: 13px; margin-top: 16px; display: none; }
+  .error { background: #fff0f0; color: #c0392b; border-radius: 8px; padding: 12px 14px; font-size: 13px; margin-top: 16px; display: none; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -68,8 +68,9 @@
 </div>
 
 <script>
-const N8N = 'https://learnwiseai.app.n8n.cloud/webhook/shotstack-upload';
-const SHOTSTACK_KEY = 'H0BObhqfZWGNyRQhKbFtPe8hIDIh1sKCCRpVu2Ub';
+const N8N_UPLOAD = 'https://learnwiseai.app.n8n.cloud/webhook/shotstack-upload';
+const N8N_STATUS = 'https://learnwiseai.app.n8n.cloud/webhook/shotstack-status';
+const SHOTSTACK_KEY = '43ozwA5mE1lKfvM2mGbW4TGnaVrCGCxWpo06DIWg';
 
 let selectedFile = null;
 
@@ -119,27 +120,44 @@ async function run() {
   }
 
   try {
-    setStatus('Uploading video...', 10);
-    const formData = new FormData();
-    formData.append('file', selectedFile);
+    // Step 1: Ask n8n for a signed S3 upload URL
+    setStatus('Getting upload URL...', 10);
+    const urlRes = await fetch(N8N_UPLOAD, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'getUploadUrl' })
+    });
+    if (!urlRes.ok) throw new Error('n8n upload URL request failed: HTTP ' + urlRes.status);
+    const urlData = await urlRes.json();
+    console.log('Upload URL response:', JSON.stringify(urlData));
 
-    const uploadRes = await fetch(N8N, { method: 'POST', body: formData });
-    if (!uploadRes.ok) throw new Error('Upload failed: ' + uploadRes.status);
-    const uploadData = await uploadRes.json();
-    console.log('n8n response:', JSON.stringify(uploadData));
+    const uploadUrl = urlData.data?.attributes?.url || urlData.uploadUrl || urlData.url;
+    const sourceId  = urlData.data?.id             || urlData.sourceId  || urlData.id;
+    if (!uploadUrl || !sourceId) throw new Error('Missing upload URL or source ID. Got: ' + JSON.stringify(urlData));
 
-    const sourceId = uploadData.data?.id || uploadData.id || uploadData.sourceId;
-    if (!sourceId) throw new Error('No source ID returned: ' + JSON.stringify(uploadData));
+    // Step 2: PUT file directly to S3
+    setStatus('Uploading video to S3...', 25);
+    const s3Res = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': selectedFile.type || 'video/mp4' },
+      body: selectedFile
+    });
+    console.log('S3 upload status:', s3Res.status, s3Res.statusText);
+    if (!s3Res.ok) throw new Error('S3 upload failed: HTTP ' + s3Res.status + ' ' + s3Res.statusText);
 
-    setStatus('Processing video...', 35);
-    const sourceUrl = await pollSource(sourceId);
+    // Step 3: Poll via n8n until source is ready
+    setStatus('Processing video (this can take a few minutes)...', 40);
+    const sourceUrl = await pollSourceViaN8n(sourceId);
 
-    setStatus('Submitting clips...', 60);
+    // Step 4: Submit render jobs
+    setStatus('Submitting clips...', 65);
     const renderIds = await Promise.all(clips.map(clip => submitRender(sourceUrl, clip)));
 
-    setStatus('Rendering clips...', 75);
+    // Step 5: Poll renders
+    setStatus('Rendering clips...', 78);
     const downloadUrls = await pollRenders(renderIds, clips);
 
+    // Done
     document.getElementById('results').style.display = 'block';
     const list = document.getElementById('clipList');
     list.innerHTML = '';
@@ -154,19 +172,23 @@ async function run() {
   }
 }
 
-async function pollSource(sourceId) {
+async function pollSourceViaN8n(sourceId) {
   for (let i = 0; i < 40; i++) {
     await sleep(5000);
-    const res = await fetch('https://api.shotstack.io/ingest/v1/sources/' + sourceId, {
-      headers: { 'x-api-key': SHOTSTACK_KEY }
+    setStatus('Processing video... checking status (' + (i+1) + '/40)', 40 + i);
+    const res = await fetch(N8N_STATUS, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceId })
     });
+    if (!res.ok) throw new Error('Status check failed: HTTP ' + res.status);
     const data = await res.json();
+    console.log('Source status response:', JSON.stringify(data));
     const status = data.data?.attributes?.status;
-    console.log('Source status:', status);
     if (status === 'ready') return data.data.attributes.source;
-    if (status === 'failed') throw new Error('Shotstack source failed to process.');
+    if (status === 'failed') throw new Error('Shotstack source processing failed.');
   }
-  throw new Error('Timed out waiting for video to process.');
+  throw new Error('Timed out: video took too long to process (>3 mins).');
 }
 
 async function submitRender(sourceUrl, clip) {
@@ -180,7 +202,7 @@ async function submitRender(sourceUrl, clip) {
     body: JSON.stringify(payload)
   });
   const data = await res.json();
-  if (!data.response?.id) throw new Error('Render failed: ' + JSON.stringify(data));
+  if (!data.response?.id) throw new Error('Render submit failed: ' + JSON.stringify(data));
   return data.response.id;
 }
 
@@ -197,9 +219,9 @@ async function pollRenders(ids, clips) {
       const data = await res.json();
       const st = data.response?.status;
       if (st === 'done') { results[i] = data.response.url; done++; }
-      else if (st === 'failed') throw new Error('Clip "' + clips[i].label + '" failed.');
+      else if (st === 'failed') throw new Error('Clip "' + (clips[i].label || i) + '" failed to render.');
     }
-    setStatus('Rendering... ' + done + '/' + ids.length + ' clips done', 75 + Math.round((done / ids.length) * 20));
+    setStatus('Rendering... ' + done + '/' + ids.length + ' clips done', 78 + Math.round((done / ids.length) * 18));
     if (done === ids.length) return results;
   }
   throw new Error('Timed out waiting for clips to render.');
