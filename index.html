@@ -124,11 +124,15 @@
       // Step 2: Upload the file directly to S3 using the signed URL (no Content-Type header)
       const xhr = new XMLHttpRequest();
       xhr.open("PUT", data.uploadUrl);
+      // Do NOT set Content-Type — breaks the S3 signed URL
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) setProgress(20 + Math.round((e.loaded / e.total) * 60));
       };
       await new Promise((resolve, reject) => {
-        xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error("S3 upload failed: " + xhr.status));
+        xhr.onload = () => {
+          if (xhr.status < 300) resolve();
+          else reject(new Error("S3 upload failed: " + xhr.status + " " + xhr.responseText));
+        };
         xhr.onerror = () => reject(new Error("Network error during upload"));
         xhr.send(file);
       });
